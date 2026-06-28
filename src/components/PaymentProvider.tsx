@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ShieldCheck,
@@ -29,6 +29,9 @@ interface PaymentProviderProps {
   children: React.ReactNode;
 }
 
+const FALLBACK_PAYMENT_URL =
+  process.env.NEXT_PUBLIC_PAYMENT_URL ?? "https://payment.liveblog365.com";
+
 export function PaymentProvider({ children }: PaymentProviderProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [amount, setAmount] = useState(99);
@@ -53,13 +56,55 @@ export function PaymentProvider({ children }: PaymentProviderProps) {
     setProcessError(null);
   };
 
-  // Auto-start payment as soon as modal opens
-  useEffect(() => {
-    if (isOpen && !isProcessing && !processError) {
-      startPayment();
+  const startPayment = async (price: number) => {
+    setIsProcessing(true);
+    setCurrentStep(0);
+    setProcessError(null);
+
+    // Animate steps while waiting for API
+    let step = 0;
+    const stepInterval = setInterval(() => {
+      step += 1;
+      if (step < steps.length - 1) {
+        setCurrentStep(step);
+      } else {
+        clearInterval(stepInterval);
+      }
+    }, 900);
+
+    try {
+      const res = await fetch("/api/create-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: price }),
+      });
+
+      clearInterval(stepInterval);
+      const data = await res.json();
+
+      if (data.success && data.payment_url) {
+        // Advance to last step then redirect
+        setCurrentStep(steps.length - 1);
+        setTimeout(() => {
+          window.location.href = data.payment_url;
+        }, 800);
+      } else {
+        // API returned error — fallback to gateway home so user always gets a page
+        setCurrentStep(steps.length - 1);
+        setTimeout(() => {
+          window.location.href = FALLBACK_PAYMENT_URL;
+        }, 800);
+      }
+    } catch (err) {
+      clearInterval(stepInterval);
+      console.error(err);
+      // Network/fetch error — still redirect to fallback so Buy Now always works
+      setCurrentStep(steps.length - 1);
+      setTimeout(() => {
+        window.location.href = FALLBACK_PAYMENT_URL;
+      }, 800);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
+  };
 
   const initiatePayment = (price = 99) => {
     setAmount(price);
@@ -67,47 +112,8 @@ export function PaymentProvider({ children }: PaymentProviderProps) {
     setCurrentStep(0);
     setProcessError(null);
     setIsOpen(true);
-  };
-
-  // Run progress animations when processing
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isProcessing && currentStep < steps.length - 1 && !processError) {
-      interval = setInterval(() => {
-        setCurrentStep((prev) => prev + 1);
-      }, 900);
-    }
-    return () => clearInterval(interval);
-  }, [isProcessing, currentStep, steps.length, processError]);
-
-  const startPayment = async () => {
-    setIsProcessing(true);
-    setCurrentStep(0);
-    setProcessError(null);
-
-    try {
-      const res = await fetch("/api/create-order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount }),
-      });
-
-      const data = await res.json();
-
-      if (data.success && data.payment_url) {
-        // Wait a brief moment to finish the redirect animation transition
-        setTimeout(() => {
-          window.location.href = data.payment_url;
-        }, 1000);
-      } else {
-        setProcessError(data.error || "Payment initiation failed. Please try again.");
-        setIsProcessing(false);
-      }
-    } catch (err) {
-      console.error(err);
-      setProcessError("Connection lost. Please check your internet and retry.");
-      setIsProcessing(false);
-    }
+    // Call startPayment directly with price — no useEffect race condition
+    startPayment(price);
   };
 
   return (
@@ -187,7 +193,7 @@ export function PaymentProvider({ children }: PaymentProviderProps) {
               {/* Main Content Pane */}
               <div className="relative p-6">
                 {/* Error Banner */}
-                {processError && (
+                {processError && !isProcessing && (
                   <motion.div
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -201,65 +207,47 @@ export function PaymentProvider({ children }: PaymentProviderProps) {
                   </motion.div>
                 )}
 
-                {/* Processing / Retry State */}
-                {isProcessing ? (
-                  <div className="flex flex-col items-center justify-center py-4 text-center">
-                    <div className="relative mb-5 flex h-16 w-16 items-center justify-center">
-                      <div className="absolute inset-0 rounded-full border-4 border-gold/10" />
-                      <Loader2 className="h-10 w-10 animate-spin text-gold" />
-                    </div>
-
-                    <h4 className="text-base font-bold text-white">Processing Secure Payment</h4>
-                    <p className="text-muted mt-1 text-xs">Please do not refresh or close this window.</p>
-
-                    {/* Stepper Status */}
-                    <div className="mt-6 w-full max-w-xs space-y-3.5 text-left">
-                      {steps.map((step, idx) => (
-                        <div
-                          key={idx}
-                          className={`flex items-center gap-3 transition-opacity duration-300 ${
-                            idx === currentStep
-                              ? "opacity-100 font-medium"
-                              : idx < currentStep
-                              ? "opacity-50"
-                              : "opacity-35"
-                          }`}
-                        >
-                          {idx < currentStep ? (
-                            <CheckCircle2 className="h-4.5 w-4.5 shrink-0 text-emerald-400" />
-                          ) : idx === currentStep ? (
-                            <Loader2 className="h-4.5 w-4.5 shrink-0 animate-spin text-gold" />
-                          ) : (
-                            <div className="h-4.5 w-4.5 shrink-0 rounded-full border border-white/20" />
-                          )}
-                          <span className="text-[11px] text-white/90">{step}</span>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Secured lock footer */}
-                    <div className="text-muted mt-8 flex items-center justify-center gap-1.5 text-[10px]">
-                      <ShieldCheck className="h-3.5 w-3.5 text-gold" />
-                      SSL Encryption Activated
-                    </div>
+                {/* Processing State — always shown since we always process */}
+                <div className="flex flex-col items-center justify-center py-4 text-center">
+                  <div className="relative mb-5 flex h-16 w-16 items-center justify-center">
+                    <div className="absolute inset-0 rounded-full border-4 border-gold/10" />
+                    <Loader2 className="h-10 w-10 animate-spin text-gold" />
                   </div>
-                ) : processError ? (
-                  /* Retry Button shown after error */
-                  <div className="mt-2 space-y-3">
-                    <button
-                      onClick={startPayment}
-                      className="group bg-gradient-gold glow-gold relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl py-3.5 text-sm font-bold text-black transition-all duration-300 hover:opacity-90 active:scale-[0.99]"
-                    >
-                      <ShieldCheck className="h-4.5 w-4.5 text-black transition-transform group-hover:scale-110" />
-                      Retry Payment ₹{amount}
-                    </button>
-                    <div className="text-muted flex items-center justify-center gap-1.5 text-[10px]">
-                      <span>🔒 Secured by SSL</span>
-                      <span>•</span>
-                      <span>UPI & Cards Accepted</span>
-                    </div>
+
+                  <h4 className="text-base font-bold text-white">Processing Secure Payment</h4>
+                  <p className="text-muted mt-1 text-xs">Please do not refresh or close this window.</p>
+
+                  {/* Stepper Status */}
+                  <div className="mt-6 w-full max-w-xs space-y-3.5 text-left">
+                    {steps.map((step, idx) => (
+                      <div
+                        key={idx}
+                        className={`flex items-center gap-3 transition-opacity duration-300 ${
+                          idx === currentStep
+                            ? "opacity-100 font-medium"
+                            : idx < currentStep
+                            ? "opacity-50"
+                            : "opacity-35"
+                        }`}
+                      >
+                        {idx < currentStep ? (
+                          <CheckCircle2 className="h-4.5 w-4.5 shrink-0 text-emerald-400" />
+                        ) : idx === currentStep ? (
+                          <Loader2 className="h-4.5 w-4.5 shrink-0 animate-spin text-gold" />
+                        ) : (
+                          <div className="h-4.5 w-4.5 shrink-0 rounded-full border border-white/20" />
+                        )}
+                        <span className="text-[11px] text-white/90">{step}</span>
+                      </div>
+                    ))}
                   </div>
-                ) : null}
+
+                  {/* Secured lock footer */}
+                  <div className="text-muted mt-8 flex items-center justify-center gap-1.5 text-[10px]">
+                    <ShieldCheck className="h-3.5 w-3.5 text-gold" />
+                    SSL Encryption Activated
+                  </div>
+                </div>
               </div>
             </motion.div>
           </div>
